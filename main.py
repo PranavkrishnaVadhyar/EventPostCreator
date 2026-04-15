@@ -4,11 +4,6 @@ Event Post Creator — Single-file pipeline
 
 Takes event details, stories, and extra context, then generates a
 publish-ready LinkedIn post using Google Gemini.
-
-Usage:
-    1. Copy .env.example → .env and fill in your GEMINI_API_KEY
-    2. pip install -r requirements.txt
-    3. python main.py
 """
 
 import json
@@ -17,7 +12,6 @@ import os
 from dotenv import load_dotenv
 import google.generativeai as genai
 
-# ── Config ────────────────────────────────────────────────────────────────────
 
 load_dotenv()
 
@@ -28,7 +22,6 @@ genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel(GEMINI_MODEL)
 
 
-# ── Prompt Templates ─────────────────────────────────────────────────────────
 
 EXTRACT_PROMPT = """You are an expert event information extractor.
 
@@ -112,7 +105,6 @@ Extra context / user instructions:
 """
 
 
-# ── Pipeline Functions ────────────────────────────────────────────────────────
 
 def extract_details(event_text: str) -> dict:
     """Send raw event description to Gemini and get structured JSON back."""
@@ -164,8 +156,6 @@ def run_pipeline(event_text: str, stories: str, extra_context: str = "") -> dict
 
     return {"details": details, "hook": hook, "post": post}
 
-
-# ── Interactive CLI ───────────────────────────────────────────────────────────
 
 def get_multiline_input(prompt_msg: str) -> str:
     """Read multiple lines until the user presses Enter on an empty line."""
