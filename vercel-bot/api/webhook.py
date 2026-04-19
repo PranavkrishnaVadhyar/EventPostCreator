@@ -2,16 +2,11 @@
 api/webhook.py — Flask Webhook for Vercel
 ==========================================
 
-Vercel calls this file on every POST Telegram sends to the webhook URL.
-Flask handles routing cleanly:
+Vercel's Python runtime looks for a module-level variable named `app`
+that is a WSGI callable. Flask's app object satisfies this.
 
-  POST /api/webhook  →  receive Telegram update  →  dispatch()
-  GET  /api/webhook  →  health check
-
-Conversation state is persisted in /tmp/conv_state.json.
-This works across warm Vercel invocations; cold starts reset it.
-For multi-user production use, swap the _load/_save helpers for
-an Upstash Redis call (see README).
+All routes accept both GET and POST from the root path / so that
+Telegram's POST always hits a valid handler regardless of URL.
 """
 
 import json
@@ -26,7 +21,7 @@ from sheets import fetch_events_from_sheet, save_event_to_sheet
 from telegram_client import answer_callback_query, edit_message_text, send_message
 
 # ---------------------------------------------------------------------------
-# App
+# App — must be named `app` for Vercel to detect it
 # ---------------------------------------------------------------------------
 
 app = Flask(__name__)
@@ -79,10 +74,6 @@ EVENT_TEXT    = "EVENT_TEXT"
 STORIES       = "STORIES"
 EXTRA_CONTEXT = "EXTRA_CONTEXT"
 
-# ---------------------------------------------------------------------------
-# Inline keyboard
-# ---------------------------------------------------------------------------
-
 MAIN_MENU_KEYBOARD = {
     "inline_keyboard": [
         [{"text": "✍️ Create a new post", "callback_data": "new_post"}],
@@ -91,31 +82,28 @@ MAIN_MENU_KEYBOARD = {
 }
 
 # ---------------------------------------------------------------------------
-# Flask routes
+# Single catch-all route — handles every path and method
 # ---------------------------------------------------------------------------
 
-
 @app.route("/", methods=["GET", "POST"])
-@app.route("/api/webhook", methods=["GET", "POST"])
-def webhook():
+@app.route("/<path:path>", methods=["GET", "POST"])
+def catch_all(path=""):
     """
-    GET  → health check (browser / uptime ping)
-    POST → Telegram update receiver
-
-    Both / and /api/webhook are accepted because Vercel may route
-    the webhook URL to either path depending on the vercel.json config.
+    Catch-all route so no request ever gets a 404 or 405.
+    GET  → health check response
+    POST → Telegram update handler
     """
     if request.method == "GET":
         return "Event Post Creator webhook is live. ✅", 200
 
     try:
         update = request.get_json(force=True, silent=True) or {}
-        logger.info("Update received: %s", json.dumps(update)[:300])
+        logger.info("Update received at /%s : %s", path, json.dumps(update)[:200])
         dispatch(update)
     except Exception:
         logger.error("Unhandled error:\n%s", traceback.format_exc())
 
-    # Always 200 — even on internal errors, so Telegram doesn't retry
+    # Always return 200 — Telegram retries on anything else
     return jsonify({"ok": True}), 200
 
 
@@ -123,11 +111,9 @@ def webhook():
 # Core dispatcher
 # ---------------------------------------------------------------------------
 
-
 def dispatch(update: dict) -> None:
     """Route an incoming Telegram update to the correct handler."""
 
-    # ── Callback query (inline button tap) ──────────────────────────────────
     if "callback_query" in update:
         cq      = update["callback_query"]
         cq_id   = cq["id"]
@@ -137,7 +123,6 @@ def dispatch(update: dict) -> None:
         handle_callback(chat_id, msg_id, cq_id, data)
         return
 
-    # ── Regular message ──────────────────────────────────────────────────────
     message = update.get("message")
     if not message:
         return
@@ -148,12 +133,10 @@ def dispatch(update: dict) -> None:
     if not text:
         return
 
-    # Commands — strip @BotName suffix if present
     if text.startswith("/"):
         handle_command(chat_id, text.split()[0].lower().split("@")[0])
         return
 
-    # Plain text — route by current conversation state
     user  = _get_user(chat_id)
     state = user.get("state")
 
@@ -164,14 +147,12 @@ def dispatch(update: dict) -> None:
     elif state == EXTRA_CONTEXT:
         handle_extra_context(chat_id, text, user)
     else:
-        # No active conversation — show the welcome menu
         show_menu(chat_id)
 
 
 # ---------------------------------------------------------------------------
 # Command handlers
 # ---------------------------------------------------------------------------
-
 
 def handle_command(chat_id: str, cmd: str) -> None:
     if cmd in ("/start", "/new"):
@@ -213,7 +194,6 @@ def handle_command(chat_id: str, cmd: str) -> None:
 # Menu
 # ---------------------------------------------------------------------------
 
-
 def show_menu(chat_id: str) -> None:
     _set_user(chat_id, {"state": MENU})
     send_message(
@@ -254,7 +234,6 @@ def handle_callback(chat_id: str, msg_id: int, cq_id: str, data: str) -> None:
 # Post-creation conversation steps
 # ---------------------------------------------------------------------------
 
-
 def handle_event_text(chat_id: str, text: str, user: dict) -> None:
     user["event_text"] = text
     user["state"]      = STORIES
@@ -294,17 +273,11 @@ def handle_extra_context(chat_id: str, text: str, user: dict) -> None:
 # Pipeline
 # ---------------------------------------------------------------------------
 
-
 def run_pipeline(chat_id: str, user: dict) -> None:
-    """
-    Full pipeline: extract → save to sheet → show details → hook → post.
-    Gemini calls are synchronous; Vercel Pro's 60-second timeout accommodates them.
-    """
     event_text    = user.get("event_text", "")
     stories       = user.get("stories", "")
     extra_context = user.get("extra_context", "")
 
-    # ── Step 1: Extract ──────────────────────────────────────────────────────
     send_message(chat_id, "🔍 *Step 1/3* — Extracting event details…", parse_mode="Markdown")
     try:
         details = extract_details(event_text)
@@ -316,14 +289,12 @@ def run_pipeline(chat_id: str, user: dict) -> None:
 
     saved        = save_event_to_sheet(details)
     sheet_status = "✅ Saved to Google Sheets." if saved else "⚠️ Could not save to Google Sheets."
-
     send_long_message(
         chat_id,
         format_details_message(details) + f"\n\n{sheet_status}",
         parse_mode="Markdown",
     )
 
-    # ── Step 2: Hook ─────────────────────────────────────────────────────────
     send_message(chat_id, "✨ *Step 2/3* — Generating hook…", parse_mode="Markdown")
     try:
         hook = generate_hook(details, stories)
@@ -333,7 +304,6 @@ def run_pipeline(chat_id: str, user: dict) -> None:
         _clear_user(chat_id)
         return
 
-    # ── Step 3: Post ─────────────────────────────────────────────────────────
     send_message(chat_id, "📝 *Step 3/3* — Generating full post…", parse_mode="Markdown")
     try:
         post = generate_post(hook, details, extra_context)
@@ -343,7 +313,6 @@ def run_pipeline(chat_id: str, user: dict) -> None:
         _clear_user(chat_id)
         return
 
-    # ── Deliver ───────────────────────────────────────────────────────────────
     send_message(chat_id, f"✨ *Generated Hook:*\n\n{hook}", parse_mode="Markdown")
     send_long_message(chat_id, "📝 *YOUR LINKEDIN POST:*\n\n" + post, parse_mode="Markdown")
     send_message(
@@ -357,9 +326,7 @@ def run_pipeline(chat_id: str, user: dict) -> None:
 # Utility
 # ---------------------------------------------------------------------------
 
-
 def send_long_message(chat_id: str, text: str, parse_mode: str = "Markdown") -> None:
-    """Split messages that exceed Telegram's 4096-character limit."""
     for i in range(0, len(text), 4096):
         send_message(chat_id, text[i : i + 4096], parse_mode=parse_mode)
 
@@ -369,7 +336,4 @@ def send_long_message(chat_id: str, text: str, parse_mode: str = "Markdown") -> 
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Run locally:  python api/webhook.py
-    # Expose with:  ngrok http 5000
-    # Register:     python set_webhook.py set https://<ngrok-id>.ngrok.io/api/webhook
     app.run(host="0.0.0.0", port=5000, debug=True)
