@@ -95,19 +95,19 @@ MAIN_MENU_KEYBOARD = {
 # ---------------------------------------------------------------------------
 
 
-@app.route("/api/webhook", methods=["GET"])
-@app.route("/", methods=["GET"])
-def health_check():
-    """Simple liveness probe — lets you verify the deployment is up."""
-    return "Event Post Creator webhook is live. ✅", 200
-
-
-@app.route("/api/webhook", methods=["POST"])
+@app.route("/", methods=["GET", "POST"])
+@app.route("/api/webhook", methods=["GET", "POST"])
 def webhook():
     """
-    Main entry point called by Telegram for every update.
-    Must return HTTP 200 quickly; Telegram retries on non-200.
+    GET  → health check (browser / uptime ping)
+    POST → Telegram update receiver
+
+    Both / and /api/webhook are accepted because Vercel may route
+    the webhook URL to either path depending on the vercel.json config.
     """
+    if request.method == "GET":
+        return "Event Post Creator webhook is live. ✅", 200
+
     try:
         update = request.get_json(force=True, silent=True) or {}
         logger.info("Update received: %s", json.dumps(update)[:300])
